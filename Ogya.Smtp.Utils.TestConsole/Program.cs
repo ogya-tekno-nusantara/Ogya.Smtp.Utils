@@ -12,17 +12,17 @@ namespace Ogya.Smtp.Utils
             service.SmtpUsername = "[EMAIL_ADDRESS]";
             service.SmtpPassword = "[PASSWORD]";
             service.SmtpEnableSsl = true;
-            service.SenderEmail = "[EMAIL_ADDRESS]";
+            service.SenderEmail = "noreplay@gmail.com";
             service.SenderName = "noreplay";
             // Menggunakan properti TemplateFilePath untuk membaca file template HTML
             service.TemplateFilePath = "EmailTemplate/EmailTemplate.html";
             
             // Mengganti placeholder dengan data asli
-            service.AddParameter("{{Nama}}", "budi santoso"); // parameter sesuaikan
+            service.AddParameter("{{Nama}}", "Samsul");
             service.AddParameter("{{Pesan}}", "Ini hanyalah test saja menggunakan HTML template.");
 
             // Konfigurasi tujuan dan subject menggunakan property baru
-            service.To = "[Email_Tujuan]";
+            service.To = new[] {"Samsul@quadras.co.id" };
             service.Subject = "Test Email Ogya.Smtp.Utils";
 
             try

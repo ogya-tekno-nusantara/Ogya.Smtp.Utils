@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Mail;
 using System.Threading.Tasks;
@@ -20,9 +21,9 @@ namespace Ogya.Smtp.Utils
         public string? BodyContent { get; set; }
         public bool IsBodyHtml { get; set; } = true;
         
-        public string? To { get; set; }
-        public string? Cc { get; set; }
-        public string? Bcc { get; set; }
+        public string[] To { get; set; } = Array.Empty<string>();
+        public string[] Cc { get; set; } = Array.Empty<string>();
+        public string[] Bcc { get; set; } = Array.Empty<string>();
         public string? Subject { get; set; }
 
         private readonly Dictionary<string, string> _parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -85,18 +86,19 @@ namespace Ogya.Smtp.Utils
 
             if (!string.IsNullOrWhiteSpace(toEmail))
                 message.To.Add(toEmail);
+            else {
+                foreach (var addr in To.Where(a => !string.IsNullOrWhiteSpace(a)))
+                    message.To.Add(addr);   
+            }
             
-            if (!string.IsNullOrWhiteSpace(To))
-                message.To.Add(To);
+            foreach (var addr in Cc.Where(a => !string.IsNullOrWhiteSpace(a)))
+                message.CC.Add(addr);
 
-            if (!string.IsNullOrWhiteSpace(Cc))
-                message.CC.Add(Cc);
+            foreach (var addr in Bcc.Where(a => !string.IsNullOrWhiteSpace(a)))
+                message.Bcc.Add(addr);
 
-            if (!string.IsNullOrWhiteSpace(Bcc))
-                message.Bcc.Add(Bcc);
-
-            if (message.To.Count == 0 && message.CC.Count == 0 && message.Bcc.Count == 0)
-                throw new InvalidOperationException("Minimal satu alamat penerima (To, Cc, atau Bcc) harus diisi.");
+            if (message.To.Count == 0)
+                throw new InvalidOperationException("Minimal satu alamat penerima harus diisi.");
 
             return message;
         }

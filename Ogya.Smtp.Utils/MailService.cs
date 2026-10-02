@@ -2,9 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Net;
-using System.Net.Mail;
 using System.Threading.Tasks;
+using MailKit.Net.Smtp;
+using MailKit.Security;
+using MimeKit;
 
 namespace Ogya.Smtp.Utils
 {
@@ -14,13 +15,22 @@ namespace Ogya.Smtp.Utils
         public int SmtpPort { get; set; }
         public string? SmtpUsername { get; set; }
         public string? SmtpPassword { get; set; }
-        public bool SmtpEnableSsl { get; set; }
+
+        /// <summary>
+        /// Mode SSL/TLS yang digunakan saat koneksi ke SMTP server.
+        /// - Auto       : Dipilih otomatis berdasarkan port (default, direkomendasikan)
+        /// - SslOnConnect: Implicit SSL — untuk port 465
+        /// - StartTls   : Explicit TLS — untuk port 587
+        /// - None       : Tanpa enkripsi — untuk port 25
+        /// </summary>
+        public SecureSocketOptions SecureSocketOptions { get; set; } = SecureSocketOptions.Auto;
+
         public string? SenderEmail { get; set; }
         public string? SenderName { get; set; }
         public string? TemplateFilePath { get; set; }
         public string? BodyContent { get; set; }
         public bool IsBodyHtml { get; set; } = true;
-        
+
         public string[] To { get; set; } = Array.Empty<string>();
         public string[] Cc { get; set; } = Array.Empty<string>();
         public string[] Bcc { get; set; } = Array.Empty<string>();
@@ -30,9 +40,9 @@ namespace Ogya.Smtp.Utils
 
         /// <summary>
         /// Menambahkan atau memperbarui parameter untuk me-replace string dalam template.
-        /// Contoh: AddParameter("user", "sams") akan mereplace {{user}} dengan "sams".
+        /// Contoh: AddParameter("{{user}}", "sams") akan mereplace {{user}} dengan "sams".
         /// </summary>
-        /// <param name="paramName">Nama parameter (tanpa kurung kurawal)</param>
+        /// <param name="paramName">Nama parameter (termasuk kurung kurawal jika diinginkan)</param>
         /// <param name="paramValue">Nilai yang akan disisipkan</param>
         public void AddParameter(string paramName, string paramValue)
         {
@@ -58,44 +68,53 @@ namespace Ogya.Smtp.Utils
             string body = templateContent;
             foreach (var param in _parameters)
             {
-                string placeholder =  param.Key ;
-                body = body.Replace(placeholder, param.Value ?? string.Empty);
+                body = body.Replace(param.Key, param.Value ?? string.Empty);
             }
             return body;
         }
 
         /// <summary>
-        /// Mempersiapkan instance MailMessage.
+        /// Membangun instance MimeMessage.
         /// </summary>
-        private MailMessage PrepareMessage(string? toEmail, string? subject, string bodyContent)
+        private MimeMessage BuildMimeMessage(string? toEmail, string? subject, string bodyContent)
         {
             if (string.IsNullOrWhiteSpace(SenderEmail))
                 throw new InvalidOperationException("SenderEmail belum dikonfigurasi.");
 
             var finalSubject = !string.IsNullOrWhiteSpace(subject) ? subject : Subject;
 
-            var message = new MailMessage
-            {
-                From = string.IsNullOrWhiteSpace(SenderName) 
-                    ? new MailAddress(SenderEmail) 
-                    : new MailAddress(SenderEmail, SenderName),
-                Subject = finalSubject,
-                Body = bodyContent,
-                IsBodyHtml = IsBodyHtml
-            };
+            var message = new MimeMessage();
 
+            message.From.Add(string.IsNullOrWhiteSpace(SenderName)
+                ? new MailboxAddress(SenderEmail, SenderEmail)
+                : new MailboxAddress(SenderName, SenderEmail));
+
+            message.Subject = finalSubject;
+
+            var bodyBuilder = new BodyBuilder();
+            if (IsBodyHtml)
+                bodyBuilder.HtmlBody = bodyContent;
+            else
+                bodyBuilder.TextBody = bodyContent;
+
+            message.Body = bodyBuilder.ToMessageBody();
+
+            // Penerima To
             if (!string.IsNullOrWhiteSpace(toEmail))
-                message.To.Add(toEmail);
-            else {
+                message.To.Add(MailboxAddress.Parse(toEmail));
+            else
+            {
                 foreach (var addr in To.Where(a => !string.IsNullOrWhiteSpace(a)))
-                    message.To.Add(addr);   
+                    message.To.Add(MailboxAddress.Parse(addr));
             }
-            
-            foreach (var addr in Cc.Where(a => !string.IsNullOrWhiteSpace(a)))
-                message.CC.Add(addr);
 
+            // Penerima Cc
+            foreach (var addr in Cc.Where(a => !string.IsNullOrWhiteSpace(a)))
+                message.Cc.Add(MailboxAddress.Parse(addr));
+
+            // Penerima Bcc
             foreach (var addr in Bcc.Where(a => !string.IsNullOrWhiteSpace(a)))
-                message.Bcc.Add(addr);
+                message.Bcc.Add(MailboxAddress.Parse(addr));
 
             if (message.To.Count == 0)
                 throw new InvalidOperationException("Minimal satu alamat penerima harus diisi.");
@@ -103,34 +122,45 @@ namespace Ogya.Smtp.Utils
             return message;
         }
 
-        /// <summary>
-        /// Mempersiapkan instance SmtpClient.
-        /// </summary>
-        private SmtpClient PrepareSmtpClient()
+        private void ValidateSmtpConfig()
         {
             if (string.IsNullOrWhiteSpace(SmtpHost))
                 throw new InvalidOperationException("SmtpHost belum dikonfigurasi.");
 
-            var client = new SmtpClient(SmtpHost, SmtpPort)
-            {
-                EnableSsl = SmtpEnableSsl
-            };
+            if (string.IsNullOrWhiteSpace(SmtpUsername))
+                throw new InvalidOperationException("SmtpUsername belum dikonfigurasi. SMTP memerlukan autentikasi.");
 
-            if (!string.IsNullOrWhiteSpace(SmtpUsername) && !string.IsNullOrWhiteSpace(SmtpPassword))
+            if (string.IsNullOrWhiteSpace(SmtpPassword))
+                throw new InvalidOperationException("SmtpPassword belum dikonfigurasi. SMTP memerlukan autentikasi.");
+        }
+
+        private string GetRawContent()
+        {
+            if (!string.IsNullOrWhiteSpace(TemplateFilePath) && File.Exists(TemplateFilePath))
+                return File.ReadAllText(TemplateFilePath);
+
+            if (!string.IsNullOrWhiteSpace(BodyContent))
+                return BodyContent!;
+
+            throw new InvalidOperationException("TemplateFilePath tidak ditemukan dan BodyContent kosong.");
+        }
+
+        private async Task<string> GetRawContentAsync()
+        {
+            if (!string.IsNullOrWhiteSpace(TemplateFilePath) && File.Exists(TemplateFilePath))
             {
-                client.UseDefaultCredentials = false;
-                client.Credentials = new NetworkCredential(SmtpUsername, SmtpPassword);
-            }
-            else
-            {
-                client.UseDefaultCredentials = true;
+                using var reader = new StreamReader(TemplateFilePath);
+                return await reader.ReadToEndAsync().ConfigureAwait(false);
             }
 
-            return client;
+            if (!string.IsNullOrWhiteSpace(BodyContent))
+                return BodyContent!;
+
+            throw new InvalidOperationException("TemplateFilePath tidak ditemukan dan BodyContent kosong.");
         }
 
         /// <summary>
-        /// Mengirim email secara sinkron (Synchronous) menggunakan parameter To dan Subject dari property class.
+        /// Mengirim email secara sinkron menggunakan parameter To dan Subject dari property class.
         /// </summary>
         public void SendEmail()
         {
@@ -138,7 +168,7 @@ namespace Ogya.Smtp.Utils
         }
 
         /// <summary>
-        /// Mengirim email secara sinkron (Synchronous).
+        /// Mengirim email secara sinkron.
         /// </summary>
         /// <param name="toEmail">Alamat email penerima</param>
         /// <param name="subject">Subjek email</param>
@@ -149,31 +179,22 @@ namespace Ogya.Smtp.Utils
 
         private void SendEmailInternal(string? toEmail, string? subject)
         {
-            string rawContent = string.Empty;
+            ValidateSmtpConfig();
 
-            if (!string.IsNullOrWhiteSpace(TemplateFilePath) && File.Exists(TemplateFilePath))
-            {
-                rawContent = File.ReadAllText(TemplateFilePath);
-            }
-            else if (!string.IsNullOrWhiteSpace(BodyContent))
-            {
-                rawContent = BodyContent ?? string.Empty;
-            }
-            else
-            {
-                throw new InvalidOperationException("TemplateFilePath tidak ditemukan dan BodyContent kosong.");
-            }
+            string processedBody = ProcessTemplate(GetRawContent());
+            var message = BuildMimeMessage(toEmail, subject, processedBody);
 
-            string processedBody = ProcessTemplate(rawContent);
-
-            using var message = PrepareMessage(toEmail, subject, processedBody);
-            using var client = PrepareSmtpClient();
-            
+            using var client = new SmtpClient();
+            // SecureSocketOptions.Auto otomatis memilih Implicit SSL (port 465)
+            // atau STARTTLS (port 587) sesuai port yang dikonfigurasi
+            client.Connect(SmtpHost, SmtpPort, SecureSocketOptions);
+            client.Authenticate(SmtpUsername, SmtpPassword);
             client.Send(message);
+            client.Disconnect(true);
         }
-        
+
         /// <summary>
-        /// Mengirim email secara asinkron (Asynchronous) menggunakan parameter To dan Subject dari property class.
+        /// Mengirim email secara asinkron menggunakan parameter To dan Subject dari property class.
         /// </summary>
         public async Task SendEmailAsync()
         {
@@ -181,7 +202,7 @@ namespace Ogya.Smtp.Utils
         }
 
         /// <summary>
-        /// Mengirim email secara asinkron (Asynchronous).
+        /// Mengirim email secara asinkron.
         /// </summary>
         /// <param name="toEmail">Alamat email penerima</param>
         /// <param name="subject">Subjek email</param>
@@ -192,30 +213,16 @@ namespace Ogya.Smtp.Utils
 
         private async Task SendEmailAsyncInternal(string? toEmail, string? subject)
         {
-            string rawContent = string.Empty;
+            ValidateSmtpConfig();
 
-            if (!string.IsNullOrWhiteSpace(TemplateFilePath) && File.Exists(TemplateFilePath))
-            {
-                using (var reader = new StreamReader(TemplateFilePath))
-                {
-                    rawContent = await reader.ReadToEndAsync().ConfigureAwait(false) ?? string.Empty;
-                }
-            }
-            else if (!string.IsNullOrWhiteSpace(BodyContent))
-            {
-                rawContent = BodyContent ?? string.Empty;
-            }
-            else
-            {
-                throw new InvalidOperationException("TemplateFilePath tidak ditemukan dan BodyContent kosong.");
-            }
-            
-            string processedBody = ProcessTemplate(rawContent);
+            string processedBody = ProcessTemplate(await GetRawContentAsync().ConfigureAwait(false));
+            var message = BuildMimeMessage(toEmail, subject, processedBody);
 
-            using var message = PrepareMessage(toEmail, subject, processedBody);
-            using var client = PrepareSmtpClient();
-            
-            await client.SendMailAsync(message).ConfigureAwait(false);
+            using var client = new SmtpClient();
+            await client.ConnectAsync(SmtpHost, SmtpPort, SecureSocketOptions).ConfigureAwait(false);
+            await client.AuthenticateAsync(SmtpUsername, SmtpPassword).ConfigureAwait(false);
+            await client.SendAsync(message).ConfigureAwait(false);
+            await client.DisconnectAsync(true).ConfigureAwait(false);
         }
     }
 }
